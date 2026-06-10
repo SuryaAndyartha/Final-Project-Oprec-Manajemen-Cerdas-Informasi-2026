@@ -1,0 +1,91 @@
+x-airflow-common:
+  &airflow-common
+  build: .
+  user: "${AIRFLOW_UID:-1000}:0"
+  environment:
+    - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+    - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres/airflow
+    - AIRFLOW__CORE__LOAD_EXAMPLES=False
+    - AIRFLOW__WEBSERVER__SECRET_KEY=rahasia_dustinia_fp_mci_2026
+    - DATA_LAKE_DIR=/opt/airflow/data_lake
+    - DATA_SOURCE_DIR=/opt/airflow/data
+    - PYTHONPATH=/opt/airflow/src
+  volumes:
+    - ./src/pipeline.py:/opt/airflow/dags/pipeline.py
+    - ./src/dags/extract_data.py:/opt/airflow/dags/extract_data.py
+    - ./src/dags/transform_data.py:/opt/airflow/dags/transform_data.py
+    - ./src/dags/load_data.py:/opt/airflow/dags/load_data.py
+    - ./src:/opt/airflow/src
+    - ./data:/opt/airflow/data
+    - ./data_lake:/opt/airflow/data_lake
+  depends_on:
+    airflow-permissions:
+      condition: service_completed_successfully
+    postgres:
+      condition: service_healthy
+
+services:
+  airflow-permissions:
+    image: apache/airflow:2.9.1-python3.11
+    user: "0:0"
+    command: >
+      bash -c "mkdir -p /opt/airflow/data_lake/raw_parquet
+      /opt/airflow/data_lake/clean_parquet
+      /opt/airflow/data_lake/rejected_parquet
+      /opt/airflow/data_lake/eda &&
+      chown -R ${AIRFLOW_UID:-1000}:0 /opt/airflow/data_lake &&
+      chmod -R ug+rwX /opt/airflow/data_lake"
+    volumes:
+      - ./data_lake:/opt/airflow/data_lake
+
+  postgres:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "airflow db migrate &&
+      airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "8080:8080"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+
+  clickhouse-server:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      - CLICKHOUSE_USER=admin
+      - CLICKHOUSE_PASSWORD=rahasia
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+  metabase:
+    image: metabase/metabase:latest
+    ports:
+      - "3000:3000"
+    depends_on:
+      - clickhouse-server
